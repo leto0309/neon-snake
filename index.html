@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>霓虹貪食蛇</title>
+<style>
+  :root {
+    --bg: #07060f;
+    --panel: #110f22;
+    --grid: rgba(120, 100, 255, 0.06);
+    --snake: #39ffb6;
+    --head: #b5ffe6;
+    --food: #ff3fa4;
+    --text: #e8e6ff;
+    --muted: #8a86b8;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: radial-gradient(ellipse at top, #1a1240 0%, var(--bg) 60%);
+    color: var(--text);
+    font-family: "Segoe UI", "Microsoft JhengHei", system-ui, sans-serif;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; padding: 16px;
+    touch-action: none; user-select: none; -webkit-user-select: none;
+  }
+  h1 {
+    margin: 0; font-size: clamp(22px, 5vw, 34px); letter-spacing: 4px;
+    color: var(--snake);
+    text-shadow: 0 0 6px var(--snake), 0 0 18px var(--snake), 0 0 40px #00ffa2aa;
+  }
+  .hud { display: flex; gap: 24px; font-size: 15px; color: var(--muted); }
+  .hud b { color: var(--text); font-size: 20px; margin-left: 6px; font-variant-numeric: tabular-nums; }
+  .wrap { position: relative; width: min(92vw, 70vh, 520px); aspect-ratio: 1; }
+  canvas {
+    width: 100%; height: 100%; display: block;
+    background: var(--panel); border-radius: 12px;
+    border: 1px solid #3b2f8a;
+    box-shadow: 0 0 24px #5b3cff55, inset 0 0 40px #000;
+  }
+  .overlay {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 12px; text-align: center;
+    background: rgba(7, 6, 15, 0.72); border-radius: 12px; backdrop-filter: blur(2px);
+  }
+  .overlay.hidden { display: none; }
+  .overlay h2 {
+    margin: 0; font-size: 30px; color: var(--food);
+    text-shadow: 0 0 8px var(--food), 0 0 24px var(--food);
+  }
+  .overlay p { margin: 0; color: var(--muted); line-height: 1.7; }
+  button {
+    font: inherit; font-size: 17px; color: var(--bg); background: var(--snake);
+    border: none; border-radius: 999px; padding: 10px 28px; cursor: pointer;
+    box-shadow: 0 0 16px var(--snake);
+  }
+  button:active { transform: scale(0.96); }
+  .hint { font-size: 13px; color: var(--muted); }
+  kbd {
+    border: 1px solid #4a4280; border-radius: 4px; padding: 0 5px; font-size: 12px; color: var(--text);
+  }
+</style>
+</head>
+<body>
+  <h1>NEON SNAKE</h1>
+  <div class="hud">
+    <span>分數<b id="score">0</b></span>
+    <span>最高<b id="best">0</b></span>
+    <span>速度<b id="level">1</b></span>
+  </div>
+
+  <div class="wrap">
+    <canvas id="game"></canvas>
+    <div class="overlay" id="overlay">
+      <h2 id="ovTitle">霓虹貪食蛇</h2>
+      <p id="ovText">吃掉粉紅色的光點，越吃越快。<br>別撞到牆壁或自己！</p>
+      <button id="startBtn">開始遊戲</button>
+    </div>
+  </div>
+
+  <div class="hint"><kbd>↑↓←→</kbd> / <kbd>WASD</kbd> 移動 · <kbd>空白鍵</kbd> 暫停 · 手機可滑動操作</div>
+
+<script>
+(() => {
+  const GRID = 20;                 // 20×20 格
+  const BASE_TICK = 140;           // 起始每步毫秒數
+  const MIN_TICK = 55;             // 最快速度
+  const BEST_KEY = 'neon-snake-best';
+
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const $score = document.getElementById('score');
+  const $best = document.getElementById('best');
+  const $level = document.getElementById('level');
+  const overlay = document.getElementById('overlay');
+  const ovTitle = document.getElementById('ovTitle');
+  const ovText = document.getElementById('ovText');
+  const startBtn = document.getElementById('startBtn');
+
+  let cell, snake, dir, dirQueue, food, score, best, state, tickMs, lastStep, particles, hue;
+
+  // ---------- 最高分（localStorage 可能被封鎖，所以包 try/catch） ----------
+  function loadBest() {
+    try { return parseInt(localStorage.getItem(BEST_KEY), 10) || 0; } catch { return 0; }
+  }
+  function saveBest(v) {
+    try { localStorage.setItem(BEST_KEY, String(v)); } catch {}
+  }
+
+  // ---------- 畫布尺寸（支援高 DPI 螢幕） ----------
+  function resize() {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(rect.width * dpr);
+    canvas.height = Math.round(rect.height * dpr);
+    cell = canvas.width / GRID;
+  }
+  window.addEventListener('resize', resize);
+
+  // ---------- 遊戲狀態 ----------
+  function reset() {
+    const mid = Math.floor(GRID / 2);
+    snake = [{ x: mid, y: mid }, { x: mid - 1, y: mid }, { x: mid - 2, y: mid }];
+    dir = { x: 1, y: 0 };
+    dirQueue = [];
+    score = 0;
+    tickMs = BASE_TICK;
+    particles = [];
+    hue = 150;
+    placeFood();
+    updateHud();
+  }
+
+  function placeFood() {
+    const free = [];
+    for (let y = 0; y < GRID; y++)
+      for (let x = 0; x < GRID; x++)
+        if (!snake.some(s => s.x === x && s.y === y)) free.push({ x, y });
+    food = free[Math.floor(Math.random() * free.length)];
+  }
+
+  function updateHud() {
+    $score.textContent = score;
+    $best.textContent = best;
+    $level.textContent = 1 + Math.round((BASE_TICK - tickMs) / 8);
+  }
+
+  // ---------- 輸入 ----------
+  const DIRS = {
+    ArrowUp: { x: 0, y: -1 }, KeyW: { x: 0, y: -1 },
+    ArrowDown: { x: 0, y: 1 }, KeyS: { x: 0, y: 1 },
+    ArrowLeft: { x: -1, y: 0 }, KeyA: { x: -1, y: 0 },
+    ArrowRight: { x: 1, y: 0 }, KeyD: { x: 1, y: 0 },
+  };
+
+  // 用佇列記錄轉向，快速連按兩次也不會原地掉頭
+  function turn(d) {
+    const last = dirQueue.length ? dirQueue[dirQueue.length - 1] : dir;
+    if (d.x === -last.x && d.y === -last.y) return;   // 不能直接反向
+    if (d.x === last.x && d.y === last.y) return;     // 同方向忽略
+    if (dirQueue.length < 3) dirQueue.push(d);
+  }
+
+  document.addEventListener('keydown', e => {
+    if (DIRS[e.code]) {
+      e.preventDefault();
+      if (state === 'running') turn(DIRS[e.code]);
+      else if (state === 'ready') { start(); turn(DIRS[e.code]); }
+    } else if (e.code === 'Space') {
+      e.preventDefault();
+      if (state === 'running') pause();
+      else if (state === 'paused') resume();
+      else start();
+    } else if (e.code === 'Enter' && state !== 'running') {
+      start();
+    }
+  });
+
+  // 觸控滑動
+  let touchStart = null;
+  canvas.addEventListener('touchstart', e => {
+    const t = e.touches[0];
+    touchStart = { x: t.clientX, y: t.clientY };
+  }, { passive: true });
+  canvas.addEventListener('touchend', e => {
+    if (!touchStart || state !== 'running') return;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - touchStart.x, dy = t.clientY - touchStart.y;
+    if (Math.max(Math.abs(dx), Math.abs(dy)) < 20) return;
+    turn(Math.abs(dx) > Math.abs(dy) ? { x: Math.sign(dx), y: 0 } : { x: 0, y: Math.sign(dy) });
+    touchStart = null;
+  });
+
+  startBtn.addEventListener('click', () => state === 'paused' ? resume() : start());
+
+  // ---------- 狀態切換 ----------
+  function showOverlay(title, text, btn) {
+    ovTitle.textContent = title;
+    ovText.innerHTML = text;
+    startBtn.textContent = btn;
+    overlay.classList.remove('hidden');
+  }
+
+  function start() {
+    reset();
+    state = 'running';
+    lastStep = performance.now();
+    overlay.classList.add('hidden');
+  }
+  function pause() {
+    state = 'paused';
+    showOverlay('暫停中', '按空白鍵繼續', '繼續');
+  }
+  function resume() {
+    state = 'running';
+    lastStep = performance.now();
+    overlay.classList.add('hidden');
+  }
+  function gameOver() {
+    state = 'over';
+    const isRecord = score > 0 && score >= best;
+    burst(snake[0].x, snake[0].y, 40, 0);
+    showOverlay(
+      isRecord ? '新紀錄！' : '遊戲結束',
+      `這局得到 <b style="color:var(--text)">${score}</b> 分` + (isRecord ? ' 🎉' : `<br>最高紀錄：${best}`),
+      '再玩一次'
+    );
+  }
+
+  // ---------- 遊戲邏輯 ----------
+  function step() {
+    if (dirQueue.length) dir = dirQueue.shift();
+    const head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
+
+    const hitWall = head.x < 0 || head.y < 0 || head.x >= GRID || head.y >= GRID;
+    const willEat = head.x === food.x && head.y === food.y;
+    // 沒吃到時尾巴會移走，所以撞自己時不算最後一節
+    const body = willEat ? snake : snake.slice(0, -1);
+    const hitSelf = body.some(s => s.x === head.x && s.y === head.y);
+    if (hitWall || hitSelf) return gameOver();
+
+    snake.unshift(head);
+    if (willEat) {
+      score += 10;
+      if (score > best) { best = score; saveBest(best); }
+      tickMs = Math.max(MIN_TICK, tickMs - 4);
+      burst(food.x, food.y, 18, 320);
+      if (snake.length === GRID * GRID) { updateHud(); return win(); }
+      placeFood();
+      updateHud();
+    } else {
+      snake.pop();
+    }
+  }
+
+  function win() {
+    state = 'over';
+    showOverlay('你填滿了整個場地！', `完美的 ${score} 分`, '再玩一次');
+  }
+
+  // ---------- 粒子特效 ----------
+  function burst(gx, gy, n, h) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, sp = 0.5 + Math.random() * 3;
+      particles.push({
+        x: (gx + 0.5) * cell, y: (gy + 0.5) * cell,
+        vx: Math.cos(a) * sp * cell / 10, vy: Math.sin(a) * sp * cell / 10,
+        life: 1, hue: h || (140 + Math.random() * 40),
+      });
+    }
+  }
+
+  // ---------- 繪圖 ----------
+  function draw(now) {
+    const W = canvas.width;
+    ctx.clearRect(0, 0, W, W);
+
+    // 格線
+    ctx.strokeStyle = 'rgba(120,100,255,0.07)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 1; i < GRID; i++) {
+      ctx.moveTo(i * cell, 0); ctx.lineTo(i * cell, W);
+      ctx.moveTo(0, i * cell); ctx.lineTo(W, i * cell);
+    }
+    ctx.stroke();
+
+    // 食物（脈動發光）
+    const pulse = 0.75 + 0.25 * Math.sin(now / 160);
+    ctx.save();
+    ctx.shadowColor = '#ff3fa4';
+    ctx.shadowBlur = cell * 1.2 * pulse;
+    ctx.fillStyle = '#ff3fa4';
+    ctx.beginPath();
+    ctx.arc((food.x + 0.5) * cell, (food.y + 0.5) * cell, cell * 0.32 * (0.9 + 0.15 * pulse), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // 蛇身：從尾巴往頭畫，顏色沿身體漸變
+    ctx.save();
+    ctx.shadowBlur = cell * 0.8;
+    const len = snake.length;
+    for (let i = len - 1; i >= 0; i--) {
+      const s = snake[i];
+      const t = i / Math.max(1, len - 1);
+      const h = (hue + t * 60) % 360;
+      const color = i === 0 ? '#c8fff0' : `hsl(${h}, 100%, ${60 - t * 15}%)`;
+      ctx.fillStyle = color;
+      ctx.shadowColor = i === 0 ? '#39ffb6' : color;
+      const pad = cell * (i === 0 ? 0.06 : 0.1 + t * 0.06);
+      roundRect(s.x * cell + pad, s.y * cell + pad, cell - pad * 2, cell - pad * 2, cell * 0.28);
+    }
+    ctx.restore();
+
+    // 蛇眼
+    if (len) {
+      const h0 = snake[0], cx = (h0.x + 0.5) * cell, cy = (h0.y + 0.5) * cell;
+      const ex = dir.y !== 0 ? cell * 0.18 : 0, ey = dir.x !== 0 ? cell * 0.18 : 0;
+      ctx.fillStyle = '#07060f';
+      for (const sgn of [-1, 1]) {
+        ctx.beginPath();
+        ctx.arc(cx + dir.x * cell * 0.15 + ex * sgn, cy + dir.y * cell * 0.15 + ey * sgn, cell * 0.08, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // 粒子
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const p of particles) {
+      ctx.fillStyle = `hsla(${p.hue}, 100%, 65%, ${p.life})`;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, cell * 0.12 * p.life + 1, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // ---------- 主迴圈 ----------
+  function loop(now) {
+    if (state === 'running') {
+      // 追趕落後的步數（但最多 3 步，避免切回分頁時瞬移）
+      let n = 0;
+      while (now - lastStep >= tickMs && state === 'running' && n < 3) {
+        lastStep += tickMs;
+        step();
+        n++;
+      }
+      if (n === 3) lastStep = now;
+      hue = (hue + 0.15) % 360;
+    }
+    particles = particles.filter(p => {
+      p.x += p.vx; p.y += p.vy; p.vx *= 0.94; p.vy *= 0.94; p.life -= 0.025;
+      return p.life > 0;
+    });
+    draw(now);
+    requestAnimationFrame(loop);
+  }
+
+  // ---------- 啟動 ----------
+  best = loadBest();
+  resize();
+  reset();
+  state = 'ready';
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
